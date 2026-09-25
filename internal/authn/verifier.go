@@ -43,9 +43,13 @@ var (
 )
 
 type Config struct {
-	Issuer    string
-	Audience  string
-	ClientIDs []string
+	Issuer   string
+	Audience string
+	// AcceptedIssuers are other hosts of the same tenant whose tokens are also
+	// accepted: the canonical tenant domain while clients move to a custom
+	// domain. Issuer alone is advertised and serves the signing keys.
+	AcceptedIssuers []string
+	ClientIDs       []string
 }
 
 // Identity deliberately excludes the raw JWT and arbitrary provider claims.
@@ -70,14 +74,27 @@ type Verifier struct {
 	keys   *keyCache
 }
 
+func canonicalIssuer(issuer string) bool {
+	u, err := url.Parse(issuer)
+	return err == nil && u.Scheme == "https" && u.Hostname() != "" && u.Path == "/" &&
+		u.User == nil && u.RawQuery == "" && !u.ForceQuery && !strings.Contains(issuer, "#") &&
+		u.RawPath == "" && u.Port() == "" && u.Host == strings.ToLower(u.Host) &&
+		!strings.HasSuffix(u.Host, ".")
+}
+
 func New(c Config) (*Verifier, error) {
-	u, err := url.Parse(c.Issuer)
-	if err != nil || u.Scheme != "https" || u.Hostname() == "" || u.Path != "/" ||
-		u.User != nil || u.RawQuery != "" || u.ForceQuery || strings.Contains(c.Issuer, "#") ||
-		u.RawPath != "" || u.Port() != "" || u.Host != strings.ToLower(u.Host) ||
-		strings.HasSuffix(u.Host, ".") || c.Audience == "" {
+	if !canonicalIssuer(c.Issuer) || c.Audience == "" {
 		return nil, errors.New("Auth0 issuer must be a canonical HTTPS origin and audience is required")
 	}
+	if len(c.AcceptedIssuers) > 4 {
+		return nil, errors.New("at most 4 accepted issuers may be configured")
+	}
+	for _, issuer := range c.AcceptedIssuers {
+		if !canonicalIssuer(issuer) {
+			return nil, errors.New("accepted issuers must be canonical HTTPS origins")
+		}
+	}
+	c.AcceptedIssuers = slices.Clone(c.AcceptedIssuers)
 	if len(c.ClientIDs) > 16 {
 		return nil, errors.New("at most 16 MCP client IDs may be configured")
 	}
@@ -108,7 +125,7 @@ func (v *Verifier) Verify(ctx context.Context, raw string) (*Identity, error) {
 		return nil, &Refusal{Reason: "empty_or_oversized"}
 	}
 	opts := []jwt.ParserOption{
-		jwt.WithValidMethods([]string{"RS256"}), jwt.WithIssuer(v.config.Issuer),
+		jwt.WithValidMethods([]string{"RS256"}),
 		jwt.WithAudience(v.config.Audience), jwt.WithExpirationRequired(),
 		jwt.WithIssuedAt(), jwt.WithLeeway(ClockSkew),
 	}
@@ -138,13 +155,15 @@ func (v *Verifier) Verify(ctx context.Context, raw string) (*Identity, error) {
 		switch {
 		case errors.Is(err, jwt.ErrTokenInvalidAudience):
 			return nil, refuse("audience")
-		case errors.Is(err, jwt.ErrTokenInvalidIssuer):
-			return nil, refuse("issuer")
 		case errors.Is(err, jwt.ErrTokenExpired):
 			return nil, refuse("expired")
 		default:
 			return nil, refuse("claims")
 		}
+	}
+	// jwt.WithIssuer takes one value; the tenant answers on several hosts.
+	if c.Issuer != v.config.Issuer && !slices.Contains(v.config.AcceptedIssuers, c.Issuer) {
+		return nil, refuse("issuer")
 	}
 	kid, ok := token.Header["kid"].(string)
 	if !ok || len(kid) == 0 || len(kid) > 128 || token.Header["crit"] != nil {

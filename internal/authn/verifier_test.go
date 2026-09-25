@@ -390,3 +390,30 @@ func TestReadyFollowsTheKeyCache(t *testing.T) {
 		t.Fatalf("readiness during backoff made %d JWKS requests", calls.Load()-before)
 	}
 }
+
+// A tenant with a custom domain signs as whichever host the client logged in
+// through. Accepted issuers keep the old host's tokens valid; nothing else is.
+func TestVerifyAcceptsConfiguredIssuersOnly(t *testing.T) {
+	key := signingKey(t)
+	v := testVerifier(t, http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		_ = json.NewEncoder(w).Encode(map[string]any{"keys": []any{publicKey(key, "key-1")}})
+	}))
+	v.config.AcceptedIssuers = []string{"https://legacy.auth0.com/"}
+	for iss, ok := range map[string]bool{
+		"https://tenant.auth0.com/":      true,
+		"https://legacy.auth0.com/":      true,
+		"https://other.auth0.com/":       false,
+		"https://legacy.auth0.com.evil/": false,
+		"https://legacy.auth0.com":       false,
+	} {
+		claims := validClaims()
+		claims["iss"] = iss
+		_, err := v.Verify(context.Background(), sign(t, key, claims, "key-1"))
+		if ok != (err == nil) {
+			t.Errorf("iss %s: err=%v, want accepted=%v", iss, err, ok)
+		}
+	}
+	if _, err := New(Config{Issuer: "https://tenant.auth0.com/", Audience: "a", AcceptedIssuers: []string{"http://legacy.auth0.com/"}}); err == nil {
+		t.Error("non-HTTPS accepted issuer was allowed")
+	}
+}

@@ -30,7 +30,7 @@ var Version = "dev"
 // Public identifiers of WebDecoy's production login. Never credentials. The
 // environment may override them for development against another tenant.
 const (
-	defaultIssuer     = "https://webdecoy.us.auth0.com/"
+	defaultIssuer     = "https://auth.webdecoy.com/"
 	defaultResource   = "https://mcp.webdecoy.com/mcp"
 	defaultClientID   = "wuNBtlyJLEInlcYwpKrEgIOAURZQqWyF"
 	defaultDisconnect = "https://api.webdecoy.com/mcp/v1/connection"
